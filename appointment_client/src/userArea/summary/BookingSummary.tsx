@@ -9,6 +9,8 @@ import {
   createNewClient,
   getBusiness,
   getClientIdByPhone,
+  getUser,
+  sendNewAppointmentMessageClient,
 } from '../../utils/http';
 import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
@@ -41,7 +43,7 @@ function test() {
 
 export default function BookingSummary() {
   const navigate = useNavigate();
-  const [address, setAddress] = useState(); // query address from business.
+  const [address, setAddress] = useState(''); // query address from business.
   const [isOverlapping, setIsOverlapping] = useState(false); // in case an appointment has been taken
   if (
     !appointmentSignal.value.uid ||
@@ -74,9 +76,12 @@ export default function BookingSummary() {
   const price = appointmentSignal.value.service?.price;
   const imgUrl = appointmentSignal.value.service?.img_url;
 
-  //check if user exists (by phone)-if not, insert him into sql db.
   useEffect(() => {
     (async () => {
+      const { address } = await getBusiness(owner_id);
+      setAddress(address);
+
+      const ownerName = await getUser(owner_id);
       const data = await checkOwnersClientExistsByPhone(phone, owner_id);
       if (data) {
         const { existsValue } = data;
@@ -117,6 +122,18 @@ export default function BookingSummary() {
             date,
             serviceId,
             note: '',
+          }).then((response) => {
+            if (typeof response === 'number' && address !== '') {
+              sendNewAppointmentMessageClient(
+                name,
+                ownerName,
+                date,
+                startTime,
+                time,
+                address,
+                phone
+              );
+            }
           });
         } else {
           setIsOverlapping(true);
@@ -125,12 +142,6 @@ export default function BookingSummary() {
     })();
   }, []);
 
-  useEffect(() => {
-    (async () => {
-      const { address } = await getBusiness(owner_id);
-      setAddress(address);
-    })();
-  }, []);
 
   if (serviceTitle && time && price && imgUrl) {
     if (isOverlapping)

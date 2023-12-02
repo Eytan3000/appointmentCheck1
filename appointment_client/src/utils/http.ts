@@ -1,5 +1,5 @@
 import axios from 'axios';
-import { addDay, timeStringToMinutes } from './helperFunctions';
+import { addDay, formatIsraeliPhoneNumberToE164, formateDateToDD_MM_YYYY, timeStringToMinutes } from './helperFunctions';
 
 interface ServiceObject {
     description: string | null;
@@ -130,8 +130,20 @@ export async function insertNewGoogleUserInDb(
     return response;
 }
 
+export async function getUser(ownerId: string) {
+    try {
+        const response = await axios.get(baseURL + '/users/read-user/' + ownerId);
+        return response.data;
 
-// services
+    } catch (error) {
+        console.error(error);
+        throw error;
+    }
+}
+
+
+
+//  ---- services  ---- 
 export async function createService(
     { name,
         description,
@@ -460,10 +472,10 @@ export async function deleteAppointment(appointmentId: string) {
 ///
 // Check overlapping Appointment
 export async function checkOverlappingAppointment(start: string, end: string, date: string, owner_id: string) {
-    console.log(start,
-        end,
-        date,
-        owner_id);
+    // console.log(start,
+    //     end,
+    //     date,
+    //     owner_id);
 
     try {
         const response = await axios.post(baseURL + '/appointments/check-overlap', {
@@ -569,6 +581,42 @@ export async function updateBusiness({ name, address, phone, ownerId }: Business
 export async function getBusiness(ownerId: string) {
     try {
         const response = await axios.get(baseURL + '/business/get-business/' + ownerId);
+        return response.data;
+
+    } catch (error) {
+        console.error(error);
+        throw error;
+    }
+}
+
+
+
+
+// Send creation appointment client message summary
+export async function sendNewAppointmentMessageClient(
+    Clientname: string,
+    Ownername: string,
+    date: string,
+    startTime: string,
+    duration: string,
+    businessAddress: string,
+    phone: string
+) {
+
+    // formate date, startTime
+    const formattedDate = formateDateToDD_MM_YYYY(date);
+    const formattedPhone = formatIsraeliPhoneNumberToE164(phone);
+
+    try {
+        const response = await axios.post(baseURL + '/send-message/client-new-appointment', {
+            Clientname,
+            Ownername,
+            date: formattedDate,
+            startTime,
+            duration,
+            businessAddress,
+            phone: formattedPhone
+        });
         return response.data;
 
     } catch (error) {

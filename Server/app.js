@@ -16,9 +16,10 @@ import {
   getClient,
   getClientExistsByPhone,
   getClientIdByPhone,
+  getUserByUid,
+  readAllAppointmentsAtDate,
   readAllClientAppointments,
   readAllOwnerAppointments,
-  readAllOwnerAppointmentsInDate,
   readAllOwnerFutureAppointments,
   readAllServices,
   readAppointment,
@@ -35,11 +36,26 @@ import {
 } from './database.js';
 import cors from 'cors';
 import { check, validationResult } from 'express-validator';
-import { addDayToDate } from './helperFunctions.js';
+import {
+  addDayToDate,
+  formatIsraeliPhoneNumberToE164,
+  getDayAfterTomorrowDate,
+  getTomorrowDate,
+} from './helperFunctions.js';
+import {
+  formulateNewSummaryClientMsg,
+  sendWhatsappMessage,
+} from './messageSend.js';
+
+import twilio from 'twilio';
+import cron from 'node-cron';
+import { eytan, sendReminderCron } from './cronFunctions.js';
 
 const app = express();
 app.use(express.json());
 app.use(cors());
+const port = process.env.PORT || 8090;
+const cronInterval = '0 19 * * *';
 
 function wait(time) {
   return new Promise((resolve) => {
@@ -71,8 +87,12 @@ app.post(
         // return res.status(400).send('eytan4000');
         return res.status(400).send(errors.array()[0].msg);
       }
-
-      const result = await createUser(id, fullname, email);
+      const user = {
+        id,
+        fullname,
+        email,
+      };
+      const result = await createUser(user);
 
       if (result.affectedRows === 1) {
         res.status(201).send('User created successfully');
@@ -156,6 +176,24 @@ app.post(
   }
 );
 
+// get uid return owner full name.
+app.get('/users/read-user/:uid', async (req, res) => {
+  try {
+    const { uid } = req.params;
+
+    const result = await getUserByUid(uid);
+
+    if (result.length > 0) {
+      res.status(201).json(result[0].fullname);
+    } else {
+      res.status(500).send('User not found');
+    }
+  } catch (err) {
+    console.error(err);
+    res.status(500).send('Server error');
+  }
+});
+
 //-- Services --
 
 // Create new service
@@ -177,14 +215,8 @@ app.post(
         return res.status(400).json({ error: errors.array() });
       }
 
-      const result = await createService(
-        name,
-        description,
-        duration,
-        price,
-        owner_id,
-        img_url
-      );
+      const user = { name, description, duration, price, owner_id, img_url };
+      const result = await createService(user);
 
       if (result.affectedRows === 1) {
         // res.status(201).send('Service created successfully');
@@ -271,15 +303,15 @@ app.post(
       if (!errors.isEmpty()) {
         return res.status(400).json({ error: errors.array() });
       }
-
-      const result = await updateService(
+      const service = {
         name,
         description,
         duration,
         price,
         service_id,
-        img_url
-      );
+        img_url,
+      };
+      const result = await updateService(service);
 
       if (result.affectedRows === 1) {
         // res.status(201).send('Service created successfully');
@@ -352,35 +384,6 @@ app.post(
   }
 );
 
-// // Create new dailySchedule
-// app.post(
-//   '/dailySchedule/create-daily-schedule',
-//   [check('workweek_id').notEmpty().withMessage('workweek_id cannot be empty')],
-//   async (req, res) => {
-//     try {
-//       const { i, workweek_id } = req.body;
-
-//       // Validate the request data
-//       const errors = validationResult(req);
-
-//       if (!errors.isEmpty()) {
-//         return res.status(400).json({ error: errors.array() });
-//       }
-
-//       const result = await createDailySchedule(i, workweek_id);
-
-//       if (result.affectedRows === 1) {
-//         res.status(201).send('WorkWeek created successfully');
-//       } else {
-//         res.status(500).send('WorkWeek creation failed');
-//       }
-//     } catch (err) {
-//       console.error(err);
-//       res.status(500).send('Server error');
-//     }
-//   }
-// );
-
 //create 7 daily schedules
 app.post(
   '/dailySchedule/create-7-daily-schedules',
@@ -404,14 +407,16 @@ app.post(
       const resultArr = await Promise.all(
         weekDaysArray.map(async (weekDay) => {
           if (typeof weekDay === 'number') return; // checks if the array object is the workweek_id
-          const result = await createDailySchedule(
-            weekDay.name,
-            weekDay.startTime,
-            weekDay.endTime,
-            workweek_id,
-            weekDay.isWorkDay,
-            weekDay.timeSlotDuration
-          );
+
+          const dailySchedule = {
+            day: weekDay.name,
+            startTime: weekDay.startTime,
+            endTime: weekDay.endTime,
+            workweekId:workweek_id,
+            isWorkDay: weekDay.isWorkDay,
+            timeSlotDuration: weekDay.timeSlotDuration,
+          };
+          const result = await createDailySchedule(dailySchedule);
           return result.insertId;
         })
       );
@@ -530,13 +535,15 @@ app.post(
 
       const resultArr = await Promise.all(
         changedArr.map(async (weekDay) => {
-          const result = await updateDailySchedule(
-            weekDay.start_time,
-            weekDay.endTime,
-            weekDay.isWorkDay,
-            weekDay.timeSlotDuration,
-            weekDay.id
-          );
+          const dailySchedule = {
+            start_time: weekDay.start_time,
+            end_time: weekDay.endTime,
+            is_work_day: weekDay.isWorkDay,
+            time_slot_duration: weekDay.timeSlotDuration,
+            dailySchedule_id: weekDay.id,
+          };
+
+          const result = await updateDailySchedule(dailySchedule);
           return result.insertId;
         })
       );
@@ -577,8 +584,13 @@ app.post(
       if (!errors.isEmpty()) {
         return res.status(400).json({ error: errors.array() });
       }
-
-      const result = await createClient(name, phone, email, owner_id);
+      const client = {
+        name,
+        phone,
+        email,
+        owner_id,
+      };
+      const result = await createClient(client);
 
       if (result.affectedRows === 1) {
         res.status(201).json(result.insertId);
@@ -607,8 +619,8 @@ app.post(
       if (!errors.isEmpty()) {
         return res.status(400).json({ error: errors.array() });
       }
-
-      const result = await updateClient(name, phone, email, client_id);
+      const client = { name, phone, email, client_id };
+      const result = await updateClient(client);
 
       if (result.affectedRows === 1) {
         res.status(201).send('Client updated successfully');
@@ -667,7 +679,7 @@ app.get('/clients/get-all-clients/:owner_id', async (req, res) => {
   }
 });
 
-// Read single blient by client_id
+// Read single client by client_id
 app.get('/clients/get-client/:client_id', async (req, res) => {
   await wait(1000);
   try {
@@ -715,7 +727,6 @@ app.get('/clients/get-client-exists-by-phone/', async (req, res) => {
 // Read clientId by Phone
 app.get('/clients/get-client-id-by-phone/', async (req, res) => {
   // await wait(1000);
-  console.log('asdfasdf');
 
   try {
     // const { phone } = req.params;
@@ -758,16 +769,16 @@ app.post(
       if (!errors.isEmpty()) {
         return res.status(400).json({ error: errors.array() });
       }
-
-      const result = await createAppointment(
+      const appointment = {
         owner_id,
         client_id,
         start,
         end,
         date,
         service_id,
-        note
-      );
+        note,
+      };
+      const result = await createAppointment(appointment);
       // console.log(result.insertId);
 
       if (result.affectedRows === 1) {
@@ -880,6 +891,56 @@ app.get(
     }
   }
 );
+
+// Read all tomorrows appointments (for all users).  date format 2023-12-07
+app.get('/appointments/get-all-tomorrows-appointments/', async (req, res) => {
+  try {
+    // Validate the request data
+    const tomorrowDate = getTomorrowDate();
+    const formattedDateForString = tomorrowDate.split('-').reverse().join('/'); // 2023-12-07 >> 07/12/2023
+
+    const dayAfterTomorrowDate = getDayAfterTomorrowDate();
+    const result = await readAllAppointmentsAtDate(dayAfterTomorrowDate);
+    // this is supposed to be tomorrow, not day after, but for some reason mysql returns -1 day in the date. check this:
+    //https://stackoverflow.com/questions/54666536/date-one-day-backwards-after-select-from-mysql-db
+
+    result.forEach(async (appointment) => {
+      const { owner_id, client_id, service_id, start } = appointment;
+
+      // get ownerName
+      const [{ fullname: ownerName }] = await getUserByUid(owner_id);
+
+      // get businessAddress
+      const [{ address: businessAddress }] = await readBusiness(owner_id);
+
+      // get clientName, clientPhone
+      const [{ Name: clientName, phone }] = await getClient(client_id);
+      const clientPhone = formatIsraeliPhoneNumberToE164(phone);
+
+      // get serviceDuration
+      const [{ duration: serviceDuration }] = await readSingleService(
+        service_id
+      );
+
+      const message = `Hello ${clientName}, you've scheduled an appointment with ${ownerName} on ${formattedDateForString} at ${start.slice(
+        0,
+        -3
+      )}. The session is located at ${businessAddress} and expected to last for ${serviceDuration} minutes.`;
+      // Hello eytan test 3, you've scheduled an appointment with user7000 on 01/12/2023 at 11:30. The session is located at Wilson 7 Tel Aviv and expected to last for 60 minutes.
+      sendWhatsappMessage(message, clientPhone);
+      // console.log(clientPhone);
+    });
+
+    if (result.length > 0) {
+      res.status(201).json(result);
+    } else {
+      res.status(500).send('No appointments tomorrows');
+    }
+  } catch (err) {
+    console.error(err);
+    res.status(500).send('Server error');
+  }
+});
 // Update appointment:
 
 app.post(
@@ -900,15 +961,9 @@ app.post(
       if (!errors.isEmpty()) {
         return res.status(400).json({ error: errors.array() });
       }
+      const appointment = { start, end, serviceId, note, date, appointment_id };
 
-      const result = await updateAppointment(
-        start,
-        end,
-        serviceId,
-        note,
-        date,
-        appointment_id
-      );
+      const result = await updateAppointment(appointment);
 
       if (result.affectedRows === 1) {
         res.status(201).send('Appointment updated successfully');
@@ -1001,8 +1056,14 @@ app.post(
       if (!errors.isEmpty()) {
         return res.status(400).json({ error: errors.array() });
       }
+      const businessDetails = {
+        owner_id,
+        name,
+        address,
+        phone,
+      };
 
-      const result = await createBusiness(owner_id, name, address, phone);
+      const result = await createBusiness(businessDetails);
 
       if (result.affectedRows === 1) {
         res.status(201).json(result.insertId);
@@ -1030,8 +1091,8 @@ app.post(
       if (!errors.isEmpty()) {
         return res.status(400).json({ error: errors.array() });
       }
-
-      const result = await updateBusiness(name, address, phone, owner_id);
+      const businesDetails = { name, address, phone, owner_id };
+      const result = await updateBusiness(businesDetails);
 
       if (result.affectedRows === 1) {
         res.status(201).send('Business updated successfully');
@@ -1066,12 +1127,107 @@ app.get('/business/get-business/:owner_id', async (req, res) => {
   }
 });
 
+// // send message for client booking new appointment.
+// app.get('/send-message', async (req, res) => {
+//   try {
+//     // Validate the request data
+//     const message = formulateNewSummaryClientMsg(
+//       'מיכל',
+//       'קארן רונן',
+//       '13/10/24',
+//       '15:00',
+//       '90',
+//       'רבניצקי 4 תל אביב'
+//     );
+//     const result = await sendWhatsappMessage(message);
+
+//     // if (result.length > 0) {
+//     //   res.status(201).json(result[0]);
+//     // } else {
+//     //   res.status(500).send('Cannot fetch business');
+//     // }
+//   } catch (err) {
+//     console.error(err);
+//     res.status(500).send('Server error');
+//   }
+// });
+
+app.post(
+  '/send-message/client-new-appointment',
+  // [check('owner_id').notEmpty().withMessage('Owner id cannot be empty')],
+  async (req, res) => {
+    await wait(1000);
+    try {
+      const {
+        Clientname,
+        Ownername,
+        date,
+        startTime,
+        duration,
+        businessAddress,
+        phone,
+      } = req.body;
+
+      // // Validate the request data
+      // const errors = validationResult(req);
+
+      // if (!errors.isEmpty()) {
+      //   return res.status(400).json({ error: errors.array() });
+      // }
+
+      const message = formulateNewSummaryClientMsg(
+        Clientname,
+        Ownername,
+        date,
+        startTime,
+        duration,
+        businessAddress
+      );
+
+      const result = await sendWhatsappMessage(message, phone);
+      console.log('app: ', result);
+
+      if (result.body) {
+        res.status(201).json('Message sent successfully');
+      } else {
+        res.status(500).send('Message sending failed');
+      }
+    } catch (err) {
+      console.error(err);
+      res.status(500).send('Server error');
+    }
+  }
+);
+
+// receive whatsapp message
+const { MessagingResponse } = twilio.twiml;
+app.post('/receive-message', (req, res) => {
+  const twiml = new MessagingResponse();
+
+  // twiml.message('אין קבלת הודעות למספר זה');
+  twiml.message('This contact number is not configured to receive messages.');
+
+  res.type('text/xml').send(twiml.toString());
+});
+
+// cron
+cron.schedule(
+  cronInterval,
+  () => {
+    sendReminderCron();
+  },
+  {
+    scheduled: true,
+    timezone: 'Asia/Jerusalem',
+  }
+);
+
 //------------------------------------------
 app.use((err, req, res, next) => {
   console.error(err.stack);
   res.status(500).send('Something broke!');
 });
 
-app.listen(8090, () => {
-  console.log('server is running on port 8090');
+app.listen(port, () => {
+  console.log('server is running on port ' + port);
 });

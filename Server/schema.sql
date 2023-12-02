@@ -42,13 +42,10 @@ INSERT INTO appointments (owner_id, client_id, start, end,date, service_id, note
 
 
 -- @block
-ALTER TABLE appointments
-ADD COLUMN date DATE;
-
+Select fullname FROM users WHERE id='KJUrnSsrFwRdNNrk896c8GFr0F32';
 
 -- @block
 DROP TABLE dailySchedule;
-
 
 
 -- @block
@@ -227,3 +224,4 @@ Desc appointments;
 
 -- @block
 
+SELECT * FROM appointments WHERE date='2023-12-12';
